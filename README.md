@@ -32,29 +32,37 @@ The latest version comes with a connection pooler that utilizes the same mango d
 
 New MongoDB C Driver Support
 ----------------------------
-The third enhancement is to add a new [MongoDB][1]' C driver. The current implementation is based on the legacy driver of MongoDB. But [MongoDB][1] is provided completely new library for driver called MongoDB's Meta Driver. So I have added support of  that driver. Now compile time option is available to use legacy and Meta driver.  I am sure there are many other benefits of the new Mongo-C-driver that we are not leveraging but we will adopt those as we learn more about the new C driver.
+The third enhancement is to add a new [MongoDB][1]' C driver.
 
-In order to use MongoDB driver 1.0.0+, take the following steps:
+Installation
+------------
 
-  * clone `libbson` version 1.0.0+ (https://github.com/mongodb/libbson).  Follow install directions on that project's README.
-  * clone `libmongoc` version 1.0.0+ (https://github.com/mongodb/mongo-c-driver).  Follow the install directions, except make sure to also run `./configure --with-libbson=system` after running automake but before running make.  This should be the default behavior, but to be certain include this step.
-  * ensure pkg-config / pkgconf is installed on your system.
-  * run `make -f Makefile.meta && make -f Makefile.meta install`
+  * download the MongoDB C driver with libbson: https://github.com/mongodb/mongo-c-driver
+```
+wget https://github.com/mongodb/mongo-c-driver/releases/download/1.9.2/mongo-c-driver-1.9.2.tar.gz
+tar -xf mongo-c-driver-*.tar.gz
+cd mongo-c-driver-*/
+```
+  * install `libbson` specifying `--with-libbson=system`
+```
+cd src/libbson/
+./configure --with-libbson=system
+checkinstall -y make install
+```
+  * install `libmongoc`
+```
+cd ../../
+./configure
+checkinstall -y make install
+```
+  * install `mongo_fdw` with `make -f Makefile.meta && make -f Makefile.meta install`
+```
+git clone git@github.com:siilike/mongo_fdw.git
+cd mongo_fdw
+make -f Makefile.meta
+checkinstall -y make -f Makefile.meta install
+```
   * if you get an error when trying to `CREATE EXTENSION mongo_fdw;`, then try running `ldconfig`
-
-Compilation script
------------------
-Number of manual steps needs to be performed to compile and install different type of MongoDB drivers and supported libraries. If you want to avoid the manual steps, there is a shell script available which will download and install the appropriate drivers and libraries for you.
-
-Here is how it works :
-
-Build with [MongoDB][1]'s legacy branch driver
-   * autogen.sh --with-legacy
-
-Build [MongoDB][1]'s  master branch driver
-   * autogen.sh --with-master
-
-The script will do all the necessary steps to build with legacy and metadriver accordingly.
 
 Usage
 -----
@@ -177,6 +185,42 @@ EXPLAIN SELECT * FROM warehouse WHERE warehouse_id = 1;
 ANALYZE warehouse;
 
 ```
+
+Query mapping
+-------------
+Simple queries that do not modify fields are mapped directly to MongoDB queries, for instance:
+
+```sql
+SELECT * FROM table;
+SELECT * FROM table WHERE field1 IS NULL;
+SELECT * FROM table WHERE field1 IS NOT NULL;
+SELECT * FROM table WHERE field1 = 5;
+SELECT * FROM table WHERE field1 = 5 AND field2 = 'a';
+SELECT * FROM table WHERE field1 IN(5,6,7);
+SELECT * FROM table WHERE field1 NOT IN(5,6,7);  
+SELECT * FROM table WHERE field1 = ANY(ARRAY[1,2,3]);
+SELECT * FROM table WHERE field1 IN(5,6,7) OR field2 = 'a';
+SELECT * FROM table WHERE (field1 = 5 AND field2 = 'a') OR (field1 = 6 AND field2 = 'b');
+```
+but these are not:
+```sql
+SELECT * FROM table WHERE field1 = 5 AND LOWER(field2) = 'a';
+SELECT * FROM table WHERE field1 = 5 OR LOWER(field2) = 'a';
+```
+The former one gets executed as:
+```sql
+SELECT * FROM table WHERE field1 = 5;
+```
+and then filtered for ```LOWER(field2) = 'a'``` in PostgresSQL, basically it is the eqivalent of:
+```sql
+WITH a AS (
+    SELECT * FROM table WHERE field1 = 5
+)
+SELECT * FROM a WHERE LOWER(field2) = 'a';
+```
+The latter one selects the whole table and performs all filtering in PostgresSQL. A warning is generated if any of the expressions cannot be mapped directly.
+
+`UPDATE` queries the rows first and then updates each of them separately by `_id`.
 
 Limitations
 -----------
