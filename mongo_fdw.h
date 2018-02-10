@@ -22,11 +22,7 @@
 #include "mongo_wrapper.h"
 #include "bson.h"
 
-#ifdef META_DRIVER
-	#include "mongoc.h"
-#else
-	#include "mongo.h"
-#endif
+#include "mongoc.h"
 
 #include "fmgr.h"
 #include "catalog/pg_foreign_server.h"
@@ -57,89 +53,49 @@
 #include "utils/memutils.h"
 #include "catalog/pg_user_mapping.h"
 
-#ifdef META_DRIVER
-	#define BSON bson_t
-	#define BSON_TYPE bson_type_t
-	#define BSON_ITERATOR bson_iter_t
-	#define MONGO_CONN mongoc_client_t
-	#define MONGO_CURSOR mongoc_cursor_t
-	#define BSON_TYPE_DOCUMENT BSON_TYPE_DOCUMENT
-	#define BSON_TYPE_NULL BSON_TYPE_NULL
-	#define BSON_TYPE_ARRAY BSON_TYPE_ARRAY
-	#define BSON_TYPE_INT32 BSON_TYPE_INT32
-	#define BSON_TYPE_INT64 BSON_TYPE_INT64
-	#define BSON_TYPE_DOUBLE BSON_TYPE_DOUBLE
-	#define BSON_TYPE_BINDATA BSON_TYPE_BINARY
-	#define BSON_TYPE_BOOL BSON_TYPE_BOOL
-	#define BSON_TYPE_UTF8 BSON_TYPE_UTF8
-	#define BSON_TYPE_OID BSON_TYPE_OID
-	#define BSON_TYPE_DATE_TIME BSON_TYPE_DATE_TIME
-	#define BSON_TYPE_SYMBOL BSON_TYPE_SYMBOL
-	#define BSON_TYPE_UNDEFINED BSON_TYPE_UNDEFINED
-	#define BSON_TYPE_REGEX BSON_TYPE_REGEX
-	#define BSON_TYPE_CODE BSON_TYPE_CODE
-	#define BSON_TYPE_CODEWSCOPE BSON_TYPE_CODEWSCOPE
-	#define BSON_TYPE_TIMESTAMP BSON_TYPE_TIMESTAMP
+#define BSON bson_t
+#define BSON_TYPE bson_type_t
+#define BSON_ITERATOR bson_iter_t
+#define MONGO_CONN mongoc_client_t
+#define MONGO_CURSOR mongoc_cursor_t
+#define BSON_TYPE_DOCUMENT BSON_TYPE_DOCUMENT
+#define BSON_TYPE_NULL BSON_TYPE_NULL
+#define BSON_TYPE_ARRAY BSON_TYPE_ARRAY
+#define BSON_TYPE_INT32 BSON_TYPE_INT32
+#define BSON_TYPE_INT64 BSON_TYPE_INT64
+#define BSON_TYPE_DOUBLE BSON_TYPE_DOUBLE
+#define BSON_TYPE_BINDATA BSON_TYPE_BINARY
+#define BSON_TYPE_BOOL BSON_TYPE_BOOL
+#define BSON_TYPE_UTF8 BSON_TYPE_UTF8
+#define BSON_TYPE_OID BSON_TYPE_OID
+#define BSON_TYPE_DATE_TIME BSON_TYPE_DATE_TIME
+#define BSON_TYPE_SYMBOL BSON_TYPE_SYMBOL
+#define BSON_TYPE_UNDEFINED BSON_TYPE_UNDEFINED
+#define BSON_TYPE_REGEX BSON_TYPE_REGEX
+#define BSON_TYPE_CODE BSON_TYPE_CODE
+#define BSON_TYPE_CODEWSCOPE BSON_TYPE_CODEWSCOPE
+#define BSON_TYPE_TIMESTAMP BSON_TYPE_TIMESTAMP
 
-	#define PREF_READ_PRIMARY_NAME "readPrimary"
-	#define PREF_READ_SECONDARY_NAME "readSecondary"
-	#define PREF_READ_PRIMARY_PREFERRED_NAME "readPrimaryPreferred"
-	#define PREF_READ_SECONDARY_PREFERRED_NAME "readSecondaryPreferred"
-	#define PREF_READ_NEAREST_NAME "readNearest"
+#define PREF_READ_PRIMARY_NAME "readPrimary"
+#define PREF_READ_SECONDARY_NAME "readSecondary"
+#define PREF_READ_PRIMARY_PREFERRED_NAME "readPrimaryPreferred"
+#define PREF_READ_SECONDARY_PREFERRED_NAME "readSecondaryPreferred"
+#define PREF_READ_NEAREST_NAME "readNearest"
 
-	#define BSON_ITER_BOOL bson_iter_bool
-	#define BSON_ITER_DOUBLE bson_iter_double
-	#define BSON_ITER_INT32 bson_iter_int32
-	#define BSON_ITER_INT64 bson_iter_int64
-	#define BSON_ITER_OID bson_iter_oid
-	#define BSON_ITER_UTF8 bson_iter_utf8
-	#define BSON_ITER_REGEX bson_iter_regex
-	#define BSON_ITER_DATE_TIME bson_iter_date_time
-	#define BSON_ITER_CODE bson_iter_code
-	#define BSON_ITER_VALUE bson_iter_value
-	#define BSON_ITER_KEY bson_iter_key
-	#define BSON_ITER_NEXT bson_iter_next
-	#define BSON_ITER_TYPE bson_iter_type
-	#define BSON_ITER_BINARY bson_iter_binary
-#else
-	#define BSON bson
-	#define BSON_TYPE bson_type
-	#define BSON_ITERATOR bson_iterator
-	#define MONGO_CONN mongo
-	#define MONGO_CURSOR mongo_cursor
-	#define BSON_TYPE_DOCUMENT BSON_OBJECT
-	#define BSON_TYPE_NULL BSON_NULL
-	#define BSON_TYPE_ARRAY BSON_ARRAY
-	#define BSON_TYPE_INT32 BSON_INT
-	#define BSON_TYPE_INT64 BSON_LONG
-	#define BSON_TYPE_DOUBLE BSON_DOUBLE
-	#define BSON_TYPE_BINDATA BSON_BINDATA
-	#define BSON_TYPE_BOOL BSON_BOOL
-	#define BSON_TYPE_UTF8 BSON_STRING
-	#define BSON_TYPE_OID BSON_OID
-	#define BSON_TYPE_DATE_TIME BSON_DATE
-	#define BSON_TYPE_SYMBOL BSON_SYMBOL
-	#define BSON_TYPE_UNDEFINED BSON_UNDEFINED
-	#define BSON_TYPE_REGEX BSON_REGEX
-	#define BSON_TYPE_CODE BSON_CODE
-	#define BSON_TYPE_CODEWSCOPE BSON_CODEWSCOPE
-	#define BSON_TYPE_TIMESTAMP BSON_TIMESTAMP
-
-	#define BSON_ITER_BOOL bson_iterator_bool
-	#define BSON_ITER_DOUBLE bson_iterator_double
-	#define BSON_ITER_INT32 bson_iterator_int
-	#define BSON_ITER_INT64 bson_iterator_long
-	#define BSON_ITER_OID bson_iterator_oid
-	#define BSON_ITER_UTF8 bson_iterator_string
-	#define BSON_ITER_REGEX bson_iterator_regex
-	#define BSON_ITER_DATE_TIME bson_iterator_date
-	#define BSON_ITER_CODE bson_iterator_code
-	#define BSON_ITER_VALUE bson_iterator_value
-	#define BSON_ITER_KEY bson_iterator_key
-	#define BSON_ITER_NEXT bson_iterator_next
-	#define BSON_ITER_TYPE bson_iterator_type
-	#define BSON_ITER_BINARY bson_iterator_bin_data
-#endif
+#define BSON_ITER_BOOL bson_iter_bool
+#define BSON_ITER_DOUBLE bson_iter_double
+#define BSON_ITER_INT32 bson_iter_int32
+#define BSON_ITER_INT64 bson_iter_int64
+#define BSON_ITER_OID bson_iter_oid
+#define BSON_ITER_UTF8 bson_iter_utf8
+#define BSON_ITER_REGEX bson_iter_regex
+#define BSON_ITER_DATE_TIME bson_iter_date_time
+#define BSON_ITER_CODE bson_iter_code
+#define BSON_ITER_VALUE bson_iter_value
+#define BSON_ITER_KEY bson_iter_key
+#define BSON_ITER_NEXT bson_iter_next
+#define BSON_ITER_TYPE bson_iter_type
+#define BSON_ITER_BINARY bson_iter_binary
 
 /* Defines for valid option names */
 #define OPTION_NAME_ADDRESS "address"
@@ -148,7 +104,6 @@
 #define OPTION_NAME_COLLECTION "collection"
 #define OPTION_NAME_USERNAME "username"
 #define OPTION_NAME_PASSWORD "password"
-#ifdef META_DRIVER
 #define OPTION_NAME_READ_PREFERENCE "read_preference"
 #define OPTION_NAME_AUTHENTICATION_DATABASE "authentication_database"
 #define OPTION_NAME_REPLICA_SET "replica_set"
@@ -159,7 +114,6 @@
 #define OPTION_NAME_CA_DIR "ca_dir"
 #define OPTION_NAME_CRL_FILE "crl_file"
 #define OPTION_NAME_WEAK_CERT "weak_cert_validation"
-#endif
 
 /* Default values for option parameters */
 #define DEFAULT_IP_ADDRESS "127.0.0.1"
@@ -189,18 +143,13 @@ typedef struct MongoValidOption
 
 
 /* Array of options that are valid for mongo_fdw */
-#ifdef META_DRIVER
 static const uint32 ValidOptionCount = 16;
-#else
-static const uint32 ValidOptionCount = 6;
-#endif
 static const MongoValidOption ValidOptionArray[] =
 {
 	/* foreign server options */
 	{ OPTION_NAME_ADDRESS, ForeignServerRelationId },
 	{ OPTION_NAME_PORT, ForeignServerRelationId },
 
-#ifdef META_DRIVER
 	{ OPTION_NAME_READ_PREFERENCE, ForeignServerRelationId },
 	{ OPTION_NAME_AUTHENTICATION_DATABASE, ForeignServerRelationId },
 	{ OPTION_NAME_REPLICA_SET, ForeignServerRelationId },
@@ -211,7 +160,6 @@ static const MongoValidOption ValidOptionArray[] =
 	{ OPTION_NAME_CA_DIR, ForeignServerRelationId },
 	{ OPTION_NAME_CRL_FILE, ForeignServerRelationId },
 	{ OPTION_NAME_WEAK_CERT, ForeignServerRelationId },
-#endif
 
 	/* foreign table options */
 	{ OPTION_NAME_DATABASE, ForeignTableRelationId },
@@ -237,7 +185,6 @@ typedef struct MongoFdwOptions
 	char *collectionName;
 	char *svr_username;
 	char *svr_password;
-#ifdef META_DRIVER
 	char *readPreference;
 	char *authenticationDatabase;
 	char *replicaSet;
@@ -248,7 +195,6 @@ typedef struct MongoFdwOptions
  	char *ca_dir;
  	char *crl_file;
  	bool weak_cert_validation;
-#endif
 } MongoFdwOptions;
 
 

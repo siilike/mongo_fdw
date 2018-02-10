@@ -152,7 +152,6 @@ mongo_get_options(Oid foreignTableId)
 	char                    *collectionName = NULL;
 	char                    *svr_username= NULL;
 	char                    *svr_password= NULL;
-#ifdef META_DRIVER
 	char                    *readPreference = NULL;
 	char                    *authenticationDatabase = NULL;
 	char                    *replicaSet = NULL;
@@ -174,7 +173,6 @@ mongo_get_options(Oid foreignTableId)
 	ca_dir = mongo_get_option_value(foreignTableId, OPTION_NAME_CA_DIR);
 	crl_file = mongo_get_option_value(foreignTableId, OPTION_NAME_CRL_FILE);
 	weak_cert_validation = mongo_get_option_value(foreignTableId, OPTION_NAME_WEAK_CERT);
-#endif
 
 	addressName = mongo_get_option_value(foreignTableId, OPTION_NAME_ADDRESS);
 	if (addressName == NULL)
@@ -206,7 +204,6 @@ mongo_get_options(Oid foreignTableId)
 	options->svr_username = svr_username;
 	options->svr_password = svr_password;
 
-#ifdef META_DRIVER
 	options->readPreference = readPreference;
 	options->authenticationDatabase = authenticationDatabase;
 	options->replicaSet = replicaSet;
@@ -217,7 +214,6 @@ mongo_get_options(Oid foreignTableId)
 	options->ca_dir = ca_dir;
 	options->crl_file = crl_file;
 	options->weak_cert_validation = weak_cert_validation;
-#endif
 
 	return options;
 }

@@ -18,11 +18,7 @@
 #include "postgres.h"
 #include "mongo_wrapper.h"
 
-#ifdef META_DRIVER
-	#include "mongoc.h"
-#else
-	#include "mongo.h"
-#endif
+#include "mongoc.h"
 
 #include <bson.h>
 #include <json.h>

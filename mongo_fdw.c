@@ -950,13 +950,8 @@ MongoExecForeignUpdate(EState *estate,
 				elog(ERROR, "system column '__doc' update is not supported");
 
 			value = slot_getattr(slot, attnum, &isnull);
-#ifdef META_DRIVER
 			AppenMongoValue(&set, slot->tts_tupleDescriptor->attrs[attnum - 1]->attname.data, value,
 							isnull ? true : false, slot->tts_tupleDescriptor->attrs[attnum - 1]->atttypid);
-#else
-			AppenMongoValue(b, slot->tts_tupleDescriptor->attrs[attnum - 1]->attname.data, value,
-							isnull ? true : false, slot->tts_tupleDescriptor->attrs[attnum - 1]->atttypid);
-#endif
 		}
 	}
 	BsonAppendFinishObject(b, &set);
@@ -1386,12 +1381,10 @@ ColumnTypesCompatible(BSON_TYPE bsonType, Oid columnTypeId)
 			{
 				compatibleTypes = true;
 			}
-#ifdef META_DRIVER
 			if (bsonType == BSON_TYPE_OID)
 			{
 				compatibleTypes = true;
 			}
-#endif
 			break;
 		}
 		case NAMEOID:
@@ -1604,7 +1597,6 @@ ColumnValue(BSON_ITERATOR *bsonIterator, Oid columnTypeId, int32 columnTypeMod)
 			int value_len;
 			char *value;
 			bytea *result;
-#ifdef META_DRIVER
 			switch (BsonIterType(bsonIterator))
 			{
 				case BSON_TYPE_OID:
@@ -1615,10 +1607,6 @@ ColumnValue(BSON_ITERATOR *bsonIterator, Oid columnTypeId, int32 columnTypeMod)
 					value = (char*)BsonIterBinData(bsonIterator, (uint32_t *)&value_len);
 					break;
 			}
-#else
-			value_len = BsonIterBinLen(bsonIterator);
-			value = (char*)BsonIterBinData(bsonIterator);
-#endif
 			result = (bytea *)palloc(value_len + VARHDRSZ);
 			memcpy(VARDATA(result), value, value_len);
 			SET_VARSIZE(result, value_len + VARHDRSZ);
@@ -1654,13 +1642,8 @@ ColumnValue(BSON_ITERATOR *bsonIterator, Oid columnTypeId, int32 columnTypeMod)
 			if (type != BSON_TYPE_ARRAY && type != BSON_TYPE_DOCUMENT)
 				ereport(ERROR, (errmsg("cannot convert scolar to json")));
 
-#ifdef META_DRIVER
 			/* Convert BSON to JSON value */
 			BsonToJsonStringValue(buffer, bsonIterator, BSON_TYPE_ARRAY == type);
-#else
-			/* Convert BSON to JSON value */
-			BsonToJsonString(buffer, *bsonIterator, BSON_TYPE_ARRAY == type);
-#endif
 			result = cstring_to_text_with_len(buffer->data, buffer->len);
 			lex = makeJsonLexContext(result, false);
 			pg_parse_json(lex, &nullSemAction);
@@ -1693,13 +1676,6 @@ BsonToJsonString(StringInfo output, BSON_ITERATOR i, bool isArray)
 		beginSymbol = '[';
 		endSymbol = ']';
 	}
-
-#ifndef META_DRIVER
-	{
-		char *bsonData = bson_iterator_value(&i);
-		bson_iterator_from_buffer(&i, bsonData);
-	}
-#endif
 
 	appendStringInfoChar(output, beginSymbol);
 
@@ -2053,7 +2029,6 @@ MongoAcquireSampleRows(Relation relation, int errorLevel,
 		}
 		else
 		{
-			#ifdef META_DRIVER
 			bson_error_t error;
 			if (mongoc_cursor_error (mongoCursor, &error))
 			{
@@ -2061,15 +2036,6 @@ MongoAcquireSampleRows(Relation relation, int errorLevel,
 				ereport(ERROR, (errmsg("could not iterate over mongo collection"),
 						errhint("Mongo driver error: %s", error.message)));
 			}
-			#else
-				mongo_cursor_error_t errorCode = mongoCursor->err;
-				if (errorCode != MONGO_CURSOR_EXHAUSTED)
-				{
-					MongoFreeScanState(fmstate);
-					ereport(ERROR, (errmsg("could not iterate over mongo collection"),
-							errhint("Mongo driver cursor error code: %d", errorCode)));
-				}
-			#endif
 			break;
 		}
 

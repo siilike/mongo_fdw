@@ -9,6 +9,8 @@
  *
  * Portions Copyright (c) 2012–2014 Citus Data, Inc.
  *
+ * Portions Copyright (c) 2018 Lauri Keel
+ *
  * IDENTIFICATION
  * 		mongo_query.c
  *
@@ -18,11 +20,7 @@
 #include "postgres.h"
 #include "mongo_wrapper.h"
 
-#ifdef META_DRIVER
-	#include "mongoc.h"
-#else
-	#include "mongo.h"
-#endif
+#include "mongoc.h"
 
 #include <bson.h>
 #include <json.h>
@@ -46,8 +44,11 @@
 static Expr * FindArgumentOfType(List *argumentList, NodeTag argumentType);
 static char * MongoOperatorName(const char *operatorName);
 static List * EqualityOperatorList(List *operatorList);
+static List * FilterOperatorList(List *operatorList, NodeTag which);
 static List * UniqueColumnList(List *operatorList);
 static List * ColumnOperatorList(Var *column, List *operatorList);
+static bool CheckValidExpressions(List *argumentList);
+static void BuildQueryDocument(Oid relationId, List *opExpressionList, ForeignScanState *scanStateNode, BSON *queryDocument, bool inArray);
 static void AppendConstantValue(BSON *queryDocument, const char *keyName,
 								Const *constant);
 static void AppendParamValue(BSON *queryDocument, const char *keyName,
@@ -80,67 +81,167 @@ ApplicableOpExpressionList(RelOptInfo *baserel)
 		Const *constant = NULL;
 		bool equalsOperator = false;
 		bool constantIsArray = false;
+		bool opExprSuccess = false;
 		Param *paramNode = NULL;
 
 		/* we only support operator expressions */
 		expressionType = nodeTag(expression);
-		if (expressionType != T_OpExpr)
+
+		if(expressionType == T_OpExpr)
 		{
-			continue;
-		}
+			opExpression = (OpExpr *) expression;
+			operatorName = get_opname(opExpression->opno);
 
-		opExpression = (OpExpr *) expression;
-		operatorName = get_opname(opExpression->opno);
-
-		/* we only support =, <, >, <=, >=, and <> operators */
-		if (strncmp(operatorName, EQUALITY_OPERATOR_NAME, NAMEDATALEN) == 0)
-		{
-			equalsOperator = true;
-		}
-
-		mongoOperatorName = MongoOperatorName(operatorName);
-		if (!equalsOperator && mongoOperatorName == NULL)
-		{
-			continue;
-		}
-
-		/*
-		 * We only support simple binary operators that compare a column against
-		 * a constant. If the expression is a tree, we don't recurse into it.
-		 */
-		argumentList = opExpression->args;
-		column = (Var *) FindArgumentOfType(argumentList, T_Var);
-		constant = (Const *) FindArgumentOfType(argumentList, T_Const);
-		paramNode = (Param *) FindArgumentOfType(argumentList, T_Param);
-
-		/*
-		 * We don't push down operators where the constant is an array, since
-		 * conditional operators for arrays in MongoDB aren't properly defined.
-		 * For example, {similar_products : [ "B0009S4IJW", "6301964144" ]}
-		 * finds results that are equal to the array, but {similar_products:
-		 * {$gte: [ "B0009S4IJW", "6301964144" ]}} returns an empty set.
-		 */
-		if (constant != NULL)
-		{
-			Oid constantArrayTypeId = get_element_type(constant->consttype);
-			if (constantArrayTypeId != InvalidOid)
+			/* we only support =, <, >, <=, >=, and <> operators */
+			if (strncmp(operatorName, EQUALITY_OPERATOR_NAME, NAMEDATALEN) == 0)
 			{
-				constantIsArray = true;
+				equalsOperator = true;
+			}
+
+			mongoOperatorName = MongoOperatorName(operatorName);
+			if (!equalsOperator && mongoOperatorName == NULL)
+			{
+				ereport(WARNING, (errmsg("Unsupported operator expression: %s", nodeToString(opExpression->args))));
+				continue;
+			}
+
+			/*
+			* We only support simple binary operators that compare a column against
+			* a constant. If the expression is a tree, we don't recurse into it.
+			*/
+			argumentList = opExpression->args;
+			column = (Var *) FindArgumentOfType(argumentList, T_Var);
+			constant = (Const *) FindArgumentOfType(argumentList, T_Const);
+			paramNode = (Param *) FindArgumentOfType(argumentList, T_Param);
+
+			/*
+			* We don't push down operators where the constant is an array, since
+			* conditional operators for arrays in MongoDB aren't properly defined.
+			* For example, {similar_products : [ "B0009S4IJW", "6301964144" ]}
+			* finds results that are equal to the array, but {similar_products:
+			* {$gte: [ "B0009S4IJW", "6301964144" ]}} returns an empty set.
+			*/
+			if (constant != NULL)
+			{
+				Oid constantArrayTypeId = get_element_type(constant->consttype);
+				if (constantArrayTypeId != InvalidOid)
+				{
+					constantIsArray = true;
+				}
+			}
+
+			if (column != NULL && constant != NULL && !constantIsArray)
+			{
+				opExpressionList = lappend(opExpressionList, opExpression);
+				opExprSuccess = true;
+			}
+
+			if (column != NULL && paramNode != NULL)
+			{
+				opExpressionList = lappend(opExpressionList, opExpression);
+				opExprSuccess = true;
+			}
+
+			if(!opExprSuccess)
+			{
+				ereport(WARNING, (errmsg("Unsupported operator expression: %s", nodeToString(argumentList))));
 			}
 		}
-
-		if (column != NULL && constant != NULL && !constantIsArray)
+		else if(expressionType == T_ScalarArrayOpExpr)
 		{
-			opExpressionList = lappend(opExpressionList, opExpression);
+			ScalarArrayOpExpr *saOpExpr = (ScalarArrayOpExpr *) expression;
+
+			if(CheckValidExpressions(saOpExpr->args))
+			{
+				opExpressionList = lappend(opExpressionList, saOpExpr);
+			}
+			else
+			{
+				ereport(WARNING, (errmsg("Unsupported scalar array expression: %s", nodeToString(saOpExpr->args))));
+			}
 		}
-
-		if (column != NULL && paramNode != NULL)
+		else if(expressionType == T_BoolExpr)
 		{
-			opExpressionList = lappend(opExpressionList, opExpression);
+			BoolExpr *bExpr = (BoolExpr *) expression;
+
+			if(CheckValidExpressions(bExpr->args))
+			{
+				opExpressionList = lappend(opExpressionList, bExpr);
+			}
+			else
+			{
+				ereport(WARNING, (errmsg("Unsupported boolean expression: %s", nodeToString(bExpr->args))));
+			}
+		}
+		else if(expressionType == T_NullTest)
+		{
+			NullTest *nExpr = (NullTest *) expression;
+
+			NodeTag nt = nodeTag(nExpr->arg);
+
+			if(nt == T_Const || nt == T_Var)
+			{
+				opExpressionList = lappend(opExpressionList, nExpr);
+			}
+			else
+			{
+				ereport(WARNING, (errmsg("Unsupported null test expression: %s", nodeToString(nExpr->arg))));
+			}
+		}
+		else
+		{
+			ereport(WARNING, (errmsg("Unsupported expression: %s", nodeToString(expression))));
 		}
 	}
 
 	return opExpressionList;
+}
+
+
+static bool
+CheckValidExpressions(List *argumentList)
+{
+	ListCell *argumentCell = NULL;
+
+	foreach(argumentCell, argumentList)
+	{
+		Expr *argument = (Expr *) lfirst(argumentCell);
+		NodeTag t = nodeTag(argument);
+		bool valid = false;
+
+		if(t == T_Const || t == T_Var)
+		{
+			valid = true;
+		}
+		else if(t == T_NullTest)
+		{
+			NullTest *expr = (NullTest *) argument;
+			NodeTag nt = nodeTag(expr->arg);
+			valid = nt == T_Const || nt == T_Var;
+		}
+		else if(t == T_OpExpr)
+		{
+			OpExpr *expr = (OpExpr *) argument;
+			valid = CheckValidExpressions(expr->args);
+		}
+		else if(t == T_ScalarArrayOpExpr)
+		{
+			ScalarArrayOpExpr *expr = (ScalarArrayOpExpr *) argument;
+			valid = CheckValidExpressions(expr->args);
+		}
+		else if(t == T_BoolExpr)
+		{
+			BoolExpr *expr = (BoolExpr *) argument;
+			valid = CheckValidExpressions(expr->args);
+		}
+
+		if(!valid)
+		{
+			return false;
+		}
+	}
+
+	return true;
 }
 
 
@@ -179,21 +280,145 @@ FindArgumentOfType(List *argumentList, NodeTag argumentType)
 BSON *
 QueryDocument(Oid relationId, List *opExpressionList, ForeignScanState *scanStateNode)
 {
-	List *equalityOperatorList = NIL;
-	List *comparisonOperatorList = NIL;
-	List *columnList = NIL;
-	ListCell *equalityOperatorCell = NULL;
-	ListCell *columnCell = NULL;
 	BSON *queryDocument = NULL;
+	char *queryJSON;
 
 	queryDocument = BsonCreate();
+
+	BuildQueryDocument(relationId, opExpressionList, scanStateNode, queryDocument, false);
+
+	if (!BsonFinish(queryDocument))
+	{
+		ereport(ERROR, (errmsg("could not create document for query"),
+						errhint("BSON flags: %d", queryDocument->flags)));
+	}
+
+	queryJSON = bson_as_canonical_extended_json(queryDocument, NULL);
+
+	ereport(DEBUG2, (errmsg_internal("Query is %s", queryJSON)));
+
+	bson_free(queryJSON);
+
+	return queryDocument;
+}
+
+void
+BuildQueryDocument(Oid relationId, List *opExpressionList, ForeignScanState *scanStateNode, BSON *queryDocument, bool inArray)
+{
+	List *equalityOperatorList = NIL;
+	List *comparisonOperatorList = NIL;
+	List *nullTestOperatorList = NIL;
+	List *boolOperatorList = NIL;
+
+	List *columnList = NIL;
+
+	ListCell *cell = NULL;
+	ListCell *equalityOperatorCell = NULL;
+	ListCell *boolOperatorCell = NULL;
+	ListCell *nullTestOperatorCell = NULL;
+	ListCell *columnCell = NULL;
+
 	/*
 	 * We distinguish between equality expressions and others since we need to
 	 * insert the latter (<, >, <=, >=, <>) as separate sub-documents into the
 	 * BSON query object.
 	 */
 	equalityOperatorList = EqualityOperatorList(opExpressionList);
-	comparisonOperatorList = list_difference(opExpressionList, equalityOperatorList);
+	boolOperatorList = FilterOperatorList(opExpressionList, T_BoolExpr);
+	nullTestOperatorList = FilterOperatorList(opExpressionList, T_NullTest);
+
+	foreach(cell, opExpressionList)
+	{
+		if((!list_member(equalityOperatorList, lfirst(cell)))
+				&& (!list_member(boolOperatorList, lfirst(cell)))
+				&& (!list_member(nullTestOperatorList, lfirst(cell))))
+		{
+			comparisonOperatorList = lappend(comparisonOperatorList, lfirst(cell));
+		}
+	}
+
+	foreach(nullTestOperatorCell, nullTestOperatorList)
+	{
+		NullTest *nullTestOperator = (NullTest *) lfirst(nullTestOperatorCell);
+
+		Oid columnId = InvalidOid;
+		char *columnName = NULL;
+
+		Var *column = (Var *) nullTestOperator->arg;
+
+		columnId = column->varattno;
+		columnName = get_relid_attribute_name(relationId, columnId);
+
+		// SELECT * FROM users5 WHERE number IS NOT NULL OR number IS NULL; = no query to MongoDB
+
+		if(inArray)
+		{
+			BSON r;
+			BSON rr;
+
+			BsonAppendStartObject(queryDocument, columnName, &r);
+			BsonAppendStartObject(&r, columnName, &rr);
+
+			BsonAppendBool(&rr, "$exists", nullTestOperator->nulltesttype == IS_NOT_NULL);
+
+			BsonAppendFinishObject(&r, &rr);
+			BsonAppendFinishObject(queryDocument, &r);
+		}
+		else
+		{
+			BSON r;
+
+			BsonAppendStartObject(queryDocument, columnName, &r);
+
+			BsonAppendBool(&r, "$exists", nullTestOperator->nulltesttype == IS_NOT_NULL);
+
+			BsonAppendFinishObject(queryDocument, &r);
+		}
+	}
+
+	foreach(boolOperatorCell, boolOperatorList)
+	{
+		BoolExpr *boolOperator = (BoolExpr *) lfirst(boolOperatorCell);
+
+		char *type = NULL;
+
+		if(boolOperator->boolop == AND_EXPR)
+		{
+			type = "$and";
+		}
+		else if(boolOperator->boolop == OR_EXPR)
+		{
+			type = "$or";
+		}
+		else if(boolOperator->boolop == NOT_EXPR)
+		{
+			type = "$not";
+		}
+
+		if(inArray)
+		{
+			BSON r;
+			BSON rr;
+
+			BsonAppendStartObject(queryDocument, type, &r);
+			BsonAppendStartArray(&r, type, &rr);
+
+			BuildQueryDocument(relationId, boolOperator->args, scanStateNode, &rr, true);
+
+			BsonAppendFinishArray(&r, &rr);
+			BsonAppendFinishObject(queryDocument, &r);
+		}
+		else
+		{
+			BSON rr;
+
+			BsonAppendStartArray(queryDocument, type, &rr);
+
+			BuildQueryDocument(relationId, boolOperator->args, scanStateNode, &rr, true);
+
+			BsonAppendFinishArray(queryDocument, &rr);
+		}
+	}
 
 	/* append equality expressions to the query */
 	foreach(equalityOperatorCell, equalityOperatorList)
@@ -212,10 +437,26 @@ QueryDocument(Oid relationId, List *opExpressionList, ForeignScanState *scanStat
 		columnId = column->varattno;
 		columnName = get_relid_attribute_name(relationId, columnId);
 
-		if (constant != NULL)
-			AppendConstantValue(queryDocument, columnName, constant);
+		if(inArray)
+		{
+			BSON rr;
+
+			BsonAppendStartObject(queryDocument, columnName, &rr);
+
+			if (constant != NULL)
+				AppendConstantValue(&rr, columnName, constant);
+			else
+				AppendParamValue(&rr, columnName, paramNode, scanStateNode);
+
+			BsonAppendFinishObject(queryDocument, &rr);
+		}
 		else
-			AppendParamValue(queryDocument, columnName, paramNode, scanStateNode);
+		{
+			if (constant != NULL)
+				AppendConstantValue(queryDocument, columnName, constant);
+			else
+				AppendParamValue(queryDocument, columnName, paramNode, scanStateNode);
+		}
 	}
 
 	/*
@@ -236,6 +477,7 @@ QueryDocument(Oid relationId, List *opExpressionList, ForeignScanState *scanStat
 		List *columnOperatorList = NIL;
 		ListCell *columnOperatorCell = NULL;
 		BSON r;
+		BSON rr;
 
 		columnId = column->varattno;
 		columnName = get_relid_attribute_name(relationId, columnId);
@@ -243,43 +485,64 @@ QueryDocument(Oid relationId, List *opExpressionList, ForeignScanState *scanStat
 		/* find all expressions that correspond to the column */
 		columnOperatorList = ColumnOperatorList(column, comparisonOperatorList);
 
-		/* for comparison expressions, start a sub-document */
-		BsonAppendStartObject(queryDocument, columnName, &r);
+		if(inArray)
+		{
+			BsonAppendStartObject(queryDocument, columnName, &rr);
+			BsonAppendStartObject(&rr, columnName, &r);
+		}
+		else
+		{
+			BsonAppendStartObject(queryDocument, columnName, &r);
+		}
 
 		foreach(columnOperatorCell, columnOperatorList)
 		{
-			OpExpr *columnOperator = (OpExpr *) lfirst(columnOperatorCell);
+			Expr *expression = lfirst(columnOperatorCell);
+			NodeTag expressionType = nodeTag(expression);
+
+			Const *constant = NULL;
 			char *operatorName = NULL;
 			char *mongoOperatorName = NULL;
 
-			List *argumentList = columnOperator->args;
-			Const *constant = (Const *) FindArgumentOfType(argumentList, T_Const);
+			if (expressionType == T_OpExpr)
+			{
+				OpExpr *columnOperator = (OpExpr *) expression;
 
-			operatorName = get_opname(columnOperator->opno);
-			mongoOperatorName = MongoOperatorName(operatorName);
-#ifdef META_DRIVER
+				List *argumentList = columnOperator->args;
+
+				constant = (Const *) FindArgumentOfType(argumentList, T_Const);
+				operatorName = get_opname(columnOperator->opno);
+				mongoOperatorName = MongoOperatorName(operatorName);
+			}
+			else if(expressionType == T_ScalarArrayOpExpr)
+			{
+				ScalarArrayOpExpr *columnOperator = (ScalarArrayOpExpr *) expression;
+
+				List *argumentList = columnOperator->args;
+
+				constant = (Const *) FindArgumentOfType(argumentList, T_Const);
+				operatorName = get_opname(columnOperator->opno);
+				mongoOperatorName = columnOperator->useOr ? "$in" : "$nin";
+			}
+			else
+			{
+				ereport(ERROR, (errmsg("Could not create document for query"), errhint("Unsupported expression type in BuildQueryDocument: %d", expressionType)));
+			}
+
 			AppendConstantValue(&r, mongoOperatorName, constant);
-#else
-			AppendConstantValue(queryDocument, mongoOperatorName, constant);
-#endif
 		}
-		BsonAppendFinishObject(queryDocument, &r);
-	}
 
-	if (!BsonFinish(queryDocument))
-	{
-#ifdef META_DRIVER
-		ereport(ERROR, (errmsg("could not create document for query"),
-						errhint("BSON flags: %d", queryDocument->flags)));
-#else
-		ereport(ERROR, (errmsg("could not create document for query"),
-						errhint("BSON error: %d", queryDocument->err)));
-#endif
+		if(inArray)
+		{
+			BsonAppendFinishObject(&rr, &r);
+			BsonAppendFinishObject(queryDocument, &rr);
+		}
+		else
+		{
+			BsonAppendFinishObject(queryDocument, &r);
+		}
 	}
-
-	return queryDocument;
 }
-
 
 /*
  * MongoOperatorName takes in the given PostgreSQL comparison operator name, and
@@ -323,17 +586,44 @@ EqualityOperatorList(List *operatorList)
 
 	foreach(operatorCell, operatorList)
 	{
-		OpExpr *operator = (OpExpr *) lfirst(operatorCell);
-		char *operatorName = NULL;
+		Expr *expression = lfirst(operatorCell);
+		NodeTag expressionType = nodeTag(expression);
 
-		operatorName = get_opname(operator->opno);
-		if (strncmp(operatorName, EQUALITY_OPERATOR_NAME, NAMEDATALEN) == 0)
+		if(expressionType == T_OpExpr)
 		{
-			equalityOperatorList = lappend(equalityOperatorList, operator);
+			OpExpr *operator = (OpExpr *) lfirst(operatorCell);
+			char *operatorName = NULL;
+
+			operatorName = get_opname(operator->opno);
+			if (strncmp(operatorName, EQUALITY_OPERATOR_NAME, NAMEDATALEN) == 0)
+			{
+				equalityOperatorList = lappend(equalityOperatorList, operator);
+			}
 		}
 	}
 
 	return equalityOperatorList;
+}
+
+
+static List *
+FilterOperatorList(List *operatorList, NodeTag which)
+{
+	List *ret = NIL;
+	ListCell *operatorCell = NULL;
+
+	foreach(operatorCell, operatorList)
+	{
+		Expr *expression = lfirst(operatorCell);
+		NodeTag expressionType = nodeTag(expression);
+
+		if(expressionType == which)
+		{
+			ret = lappend(ret, lfirst(operatorCell));
+		}
+	}
+
+	return ret;
 }
 
 
@@ -350,9 +640,27 @@ UniqueColumnList(List *operatorList)
 
 	foreach(operatorCell, operatorList)
 	{
-		OpExpr *operator = (OpExpr *) lfirst(operatorCell);
-		List *argumentList = operator->args;
-		Var *column = (Var *) FindArgumentOfType(argumentList, T_Var);
+		Expr *expression = lfirst(operatorCell);
+		NodeTag expressionType = nodeTag(expression);
+		List *argumentList = NULL;
+		Var *column = NULL;
+
+		if(expressionType == T_OpExpr)
+		{
+			OpExpr *operator = (OpExpr *) lfirst(operatorCell);
+			argumentList = operator->args;
+		}
+		else if(expressionType == T_ScalarArrayOpExpr)
+		{
+			ScalarArrayOpExpr *operator = (ScalarArrayOpExpr *) lfirst(operatorCell);
+			argumentList = operator->args;
+		}
+		else
+		{
+			ereport(ERROR, (errmsg("Could not create document for query"), errhint("Unsupported expression type in UniqueColumnList: %d", expressionType)));
+		}
+
+		column = (Var *) FindArgumentOfType(argumentList, T_Var);
 
 		/* list membership is determined via column's equal() function */
 		uniqueColumnList = list_append_unique(uniqueColumnList, column);
@@ -374,13 +682,37 @@ ColumnOperatorList(Var *column, List *operatorList)
 
 	foreach(operatorCell, operatorList)
 	{
-		OpExpr *operator = (OpExpr *) lfirst(operatorCell);
-		List *argumentList = operator->args;
+		Expr *expression = lfirst(operatorCell);
+		NodeTag expressionType = nodeTag(expression);
 
-		Var *foundColumn = (Var *) FindArgumentOfType(argumentList, T_Var);
-		if (equal(column, foundColumn))
+		List *argumentList = NULL;
+		Var *foundColumn = NULL;
+
+		if(expressionType == T_OpExpr)
 		{
-			columnOperatorList = lappend(columnOperatorList, operator);
+			OpExpr *operator = (OpExpr *) lfirst(operatorCell);
+			argumentList = operator->args;
+
+			foundColumn = (Var *) FindArgumentOfType(argumentList, T_Var);
+			if (equal(column, foundColumn))
+			{
+				columnOperatorList = lappend(columnOperatorList, operator);
+			}
+		}
+		else if(expressionType == T_ScalarArrayOpExpr)
+		{
+			ScalarArrayOpExpr *operator = (ScalarArrayOpExpr *) lfirst(operatorCell);
+			argumentList = operator->args;
+
+			foundColumn = (Var *) FindArgumentOfType(argumentList, T_Var);
+			if (equal(column, foundColumn))
+			{
+				columnOperatorList = lappend(columnOperatorList, operator);
+			}
+		}
+		else
+		{
+			ereport(ERROR, (errmsg("Could not create document for query"), errhint("Unsupported expression type in ColumnOperatorList: %d", expressionType)));
 		}
 	}
 
@@ -511,20 +843,17 @@ AppenMongoValue(BSON *queryDocument, const char *keyName, Datum value, bool isnu
 				len = VARSIZE_4B(result) - VARHDRSZ;
 				data = VARDATA_4B(result);
 			}
-#ifdef META_DRIVER
-                        if (strcmp(keyName, "_id") == 0)
-                        {
-                            bson_oid_t oid;
-                            bson_oid_init_from_data(&oid, (const uint8_t *)data);
-                            status = BsonAppendOid(queryDocument, keyName, &oid);
-                        }
-                        else
-                        {
-			    status = BsonAppendBinary(queryDocument, keyName, data, len);
-                        }
-#else
-			status = BsonAppendBinary(queryDocument, keyName, data, len);
-#endif
+
+			if (strcmp(keyName, "_id") == 0)
+			{
+					bson_oid_t oid;
+					bson_oid_init_from_data(&oid, (const uint8_t *)data);
+					status = BsonAppendOid(queryDocument, keyName, &oid);
+			}
+			else
+			{
+				status = BsonAppendBinary(queryDocument, keyName, data, len);
+			}
 			break;
 		}
 		case NAMEOID:
@@ -589,11 +918,7 @@ AppenMongoValue(BSON *queryDocument, const char *keyName, Datum value, bool isnu
 
 				valueDatum = DirectFunctionCall1(numeric_float8, elem_values[i]);
 				valueFloat = DatumGetFloat8(valueDatum);
-#ifdef META_DRIVER
 				status = BsonAppendDouble(&t, keyName, valueFloat);
-#else
-				status = BsonAppendDouble(queryDocument, keyName, valueFloat);
-#endif
 			}
 			BsonAppendFinishArray(queryDocument, &t);
 			pfree(elem_values);
@@ -629,8 +954,10 @@ AppenMongoValue(BSON *queryDocument, const char *keyName, Datum value, bool isnu
 					continue;
 				getTypeOutputInfo(TEXTOID, &outputFunctionId, &typeVarLength);
 				valueString = OidOutputFunctionCall(outputFunctionId, elem_values[i]);
-				status = BsonAppendUTF8(queryDocument, keyName, valueString);
+
+				status = BsonAppendUTF8(&t, keyName, valueString);
 			}
+
 			BsonAppendFinishArray(queryDocument, &t);
 			pfree(elem_values);
 			pfree(elem_nulls);

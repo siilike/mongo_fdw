@@ -175,10 +175,14 @@ MongoCursorCreate(MONGO_CONN* conn, char* database, char *collection, BSON* q)
 
 	c = mongoc_client_get_collection (conn, database, collection);
 	cur = mongoc_collection_find(c, MONGOC_QUERY_SLAVE_OK, 0, 0, 0, q, NULL, NULL);
-	mongoc_cursor_error(cur, &error);
-	if (!cur)
+
+	if (mongoc_cursor_error (cur, &error))
+	{
+		char* str = bson_as_canonical_extended_json (q, NULL);
+
 		ereport(ERROR, (errmsg("failed to create cursor"),
-						errhint("Mongo error: \"%s\"", error.message)));
+				errhint("Mongo driver error: \"%s\", query was %s", error.message, str)));
+	}
 
 	mongoc_collection_destroy(c);
 	return cur;
@@ -567,7 +571,7 @@ MongoAggregateCount(MONGO_CONN* conn, const char* database, const char* collecti
 			bson_copy_to(doc, reply);
 			if (bson_iter_init_find(&it, reply, "n"))
 				count = BsonIterDouble(&it);
-			BsonDestroy(doc);
+// 			BsonDestroy(doc);
 		}
 		mongoc_cursor_destroy(cursor);
 	}
